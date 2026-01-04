@@ -209,6 +209,19 @@ h1 {
   font-size: 0.9rem;
 }
 
+.settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.mode-select {
+  font-size: 0.8rem;
+  padding: 0.4rem 0.5rem;
+  border-color: rgba(59, 130, 246, 0.3);
+  background: rgba(59, 130, 246, 0.05);
+}
+
 .btn-primary {
   background: var(--primary);
   color: white;

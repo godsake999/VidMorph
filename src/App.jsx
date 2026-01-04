@@ -58,6 +58,7 @@ export default function App() {
       status: 'ready',
       progress: 0,
       targetFormat: 'mp4',
+      conversionMode: 'balanced', // 'copy', 'balanced', 'high-quality'
       customName: file.name.replace(/\.[^/.]+$/, ""),
       outputUrl: null
     }));
@@ -101,46 +102,44 @@ export default function App() {
       // Optimized conversion arguments
       let ffmpegArgs = [];
 
-      switch (targetFormat) {
-        case 'mp3':
-          ffmpegArgs = ['-i', inputName, '-vn', '-ab', '192k', '-ar', '44100', '-y', outputName];
-          break;
-        case 'mp4':
-          // Match original resolution and use fast H.264 encoding
-          ffmpegArgs = ['-i', inputName, '-preset', 'ultrafast', '-crf', '22', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-y', outputName];
-          break;
-        case '3gp':
-          // Standard 3GP settings
-          ffmpegArgs = ['-i', inputName, '-r', '15', '-s', '176x144', '-vcodec', 'h263', '-acodec', 'amr_nb', '-ar', '8000', '-ac', '1', '-y', outputName];
-          break;
-        case 'flv':
-          ffmpegArgs = ['-i', inputName, '-c:v', 'flv1', '-c:a', 'mp3', '-y', outputName];
-          break;
-        default:
-          // General high-quality settings for other formats (MOV, MKV, AVI, etc.)
-          ffmpegArgs = ['-i', inputName, '-preset', 'ultrafast', '-y', outputName];
+      if (fileItem.conversionMode === 'copy' && targetFormat !== 'mp3') {
+        // Stream Copy (Instant - Original Resolution/Quality)
+        ffmpegArgs = ['-i', inputName, '-c', 'copy', '-y', outputName];
+      } else {
+        switch (targetFormat) {
+          case 'mp3':
+            ffmpegArgs = ['-i', inputName, '-vn', '-ab', '192k', '-ar', '44100', '-y', outputName];
+            break;
+          case 'mp4':
+            const crf = fileItem.conversionMode === 'high-quality' ? '18' : '28';
+            ffmpegArgs = ['-i', inputName, '-preset', 'ultrafast', '-crf', crf, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-y', outputName];
+            break;
+          case '3gp':
+            ffmpegArgs = ['-i', inputName, '-r', '15', '-s', '176x144', '-vcodec', 'h263', '-acodec', 'amr_nb', '-ar', '8000', '-ac', '1', '-y', outputName];
+            break;
+          case 'flv':
+            ffmpegArgs = ['-i', inputName, '-c:v', 'flv1', '-c:a', 'mp3', '-y', outputName];
+            break;
+          default:
+            ffmpegArgs = ['-i', inputName, '-preset', 'ultrafast', '-y', outputName];
+        }
       }
 
       await ffmpeg.exec(ffmpegArgs);
 
       const data = await ffmpeg.readFile(outputName);
-
-      // FFmpeg.wasm v0.12 returns a Uint8Array. 
-      // Passing it directly in an array to the Blob constructor is the standard way.
       const mimeType = getMimeType(targetFormat);
       const fileBlob = new Blob([data], { type: mimeType });
       const url = URL.createObjectURL(fileBlob);
-
       const finalFileName = `${fileItem.customName}_vidmorph.${targetFormat}`;
-
-      console.log(`Generated file: ${finalFileName}, Mime: ${mimeType}, Size: ${data.length} bytes`);
 
       setFiles(prev => prev.map(f => f.id === id ? {
         ...f,
         status: 'done',
         progress: 100,
         outputUrl: url,
-        outputName: finalFileName
+        outputName: finalFileName,
+        blobData: data // Keep for fallback download
       } : f));
     } catch (err) {
       console.error("Conversion error:", err);
@@ -155,13 +154,41 @@ export default function App() {
     }
   };
 
-  const downloadFile = (file) => {
-    const link = document.createElement('a');
-    link.href = file.outputUrl;
-    link.download = file.outputName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const downloadFile = async (file) => {
+    try {
+      // Logic for Android WebViews: If the file is small, using data: URL can be more reliable
+      // If it's large, we stick to Blob but with an forced interaction
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+      if (isMobile && file.blobData && file.blobData.length < 25 * 1024 * 1024) { // < 25MB
+        console.log("Using Data URL for Mobile download fallback...");
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64data = reader.result;
+          const link = document.createElement('a');
+          link.href = base64data;
+          link.download = file.outputName;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+        };
+        reader.readAsDataURL(new Blob([file.blobData], { type: 'application/octet-stream' }));
+      } else {
+        const link = document.createElement('a');
+        link.href = file.outputUrl;
+        link.download = file.outputName;
+        link.target = '_blank'; // Important for some mobile wrappers
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(() => {
+          document.body.removeChild(link);
+        }, 100);
+      }
+    } catch (e) {
+      console.error("Download failed", e);
+      // Final fallback: try to re-trigger URL creation
+      window.open(file.outputUrl, '_blank');
+    }
   };
 
   const stopConversion = (id) => {
@@ -176,6 +203,10 @@ export default function App() {
 
   const handleFormatChange = (id, format) => {
     setFiles(prev => prev.map(f => f.id === id ? { ...f, targetFormat: format } : f));
+  };
+
+  const handleModeChange = (id, mode) => {
+    setFiles(prev => prev.map(f => f.id === id ? { ...f, conversionMode: mode } : f));
   };
 
   const batchConvert = async () => {
@@ -271,14 +302,26 @@ export default function App() {
                     </div>
 
                     <div className="controls-group">
-                      <select
-                        className="format-select"
-                        value={file.targetFormat}
-                        onChange={(e) => handleFormatChange(file.id, e.target.value)}
-                        disabled={file.status === 'processing'}
-                      >
-                        {FORMATS.map(f => <option key={f} value={f}>{f.toUpperCase()}</option>)}
-                      </select>
+                      <div className="settings-stack">
+                        <select
+                          className="format-select"
+                          value={file.targetFormat}
+                          onChange={(e) => handleFormatChange(file.id, e.target.value)}
+                          disabled={file.status === 'processing'}
+                        >
+                          {FORMATS.map(f => <option key={f} value={f}>{f.toUpperCase()}</option>)}
+                        </select>
+                        <select
+                          className="format-select mode-select"
+                          value={file.conversionMode}
+                          onChange={(e) => handleModeChange(file.id, e.target.value)}
+                          disabled={file.status === 'processing' || file.targetFormat === 'mp3'}
+                        >
+                          <option value="copy">🚀 Fast Stream Copy</option>
+                          <option value="balanced">⚖️ Balanced</option>
+                          <option value="high-quality">✨ High Quality</option>
+                        </select>
+                      </div>
 
                       <div className="controls">
                         {file.status === 'ready' && (
